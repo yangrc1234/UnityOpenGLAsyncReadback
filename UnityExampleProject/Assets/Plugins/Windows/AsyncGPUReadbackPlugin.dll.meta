@@ -1,12 +1,14 @@
 fileFormatVersion: 2
-guid: 925ba0389c98b416d9f7f66afedc6ca6
+guid: dbb367131f703e046af0e7af725b1674
 PluginImporter:
   externalObjects: {}
   serializedVersion: 2
   iconMap: {}
   executionOrder: {}
+  defineConstraints: []
   isPreloaded: 0
   isOverridable: 0
+  isExplicitlyReferenced: 0
   platformData:
   - first:
       '': Any
@@ -30,9 +32,9 @@ PluginImporter:
     second:
       enabled: 1
       settings:
-        CPU: AnyCPU
+        CPU: x86_64
         DefaultValueInitialized: true
-        OS: AnyOS
+        OS: Windows
   - first:
       Facebook: Win
     second:
@@ -78,12 +80,6 @@ PluginImporter:
       Standalone: Win64
     second:
       enabled: 1
-      settings:
-        CPU: AnyCPU
-  - first:
-      Windows Store Apps: WindowsStoreApps
-    second:
-      enabled: 0
       settings:
         CPU: AnyCPU
   userData: 

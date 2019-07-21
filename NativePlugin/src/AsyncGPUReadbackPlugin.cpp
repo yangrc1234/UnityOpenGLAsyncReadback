@@ -7,6 +7,7 @@
 #include "Unity/IUnityGraphics.h"
 #include <iostream>
 #include "TypeHelpers.hpp"
+#include <string>
 
 #define DEBUG 1
 #ifdef DEBUG
@@ -14,35 +15,218 @@
 	#include <thread>
 #endif
 
-struct Task {
-	GLuint texture;
-	GLuint fbo;
-	GLuint pbo;
-	GLsync fence;
+struct BaseTask {
 	bool initialized = false;
 	bool error = false;
 	bool done = false;
-	void* data;
-	int miplevel;
+	/*Called in render thread*/
+	virtual void StartRequest() = 0;
+	virtual void Update() = 0;
+	virtual void* GetData(size_t* length) = 0;
+	virtual void Release() = 0;
+};
+
+struct SsboTask : public BaseTask {
+	GLuint ssbo;
+	GLuint pbo;
+	void* data = nullptr;
+	GLsync fence;
+	GLint bufferSize;
+	void Init(GLuint ssbo, GLint bufferSize) {
+		this->ssbo = ssbo;
+		this->bufferSize = bufferSize;
+	}
+
+	virtual void StartRequest() override {
+		//bind it to GL_COPY_WRITE_BUFFER to wait for use
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, this->ssbo);
+
+		//Get our pbo ready.
+		glGenBuffers(1, &pbo);
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, this->pbo);
+		//Initialize pbo buffer storage.
+		glBufferData(GL_PIXEL_PACK_BUFFER, bufferSize, 0, GL_STREAM_READ);
+
+		//Copy data to pbo.
+		glCopyBufferSubData(GL_SHADER_STORAGE_BUFFER, GL_PIXEL_PACK_BUFFER, 0, 0, bufferSize);
+
+		//Unbind buffers.
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+		//Create a fence.
+		fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+
+		// Allocate the final data buffer !!! WARNING: free, will have to be done on script side !!!!
+		data = new char[bufferSize];
+	}
+
+	virtual void Update() {
+		// Check fence state
+		GLint status = 0;
+		GLsizei length = 0;
+		glGetSynciv(fence, GL_SYNC_STATUS, sizeof(GLint), &length, &status);
+		if (length <= 0) {
+			error = true;
+			done = true;
+			return;
+		}
+
+		// When it's done
+		if (status == GL_SIGNALED) {
+
+			// Bind back the pbo
+			glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+
+			// Map the buffer and copy it to data
+			void* ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bufferSize, GL_MAP_READ_BIT);
+			std::memcpy(data, ptr, bufferSize);
+
+			// Unmap and unbind
+			glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+			glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+			// Clear buffers
+			glDeleteBuffers(1, &(pbo));
+			glDeleteSync(fence);
+
+			// yeah task is done!
+			done = true;
+		}
+	}
+
+	virtual void* GetData(size_t* length) override {
+		if (!done) {
+			return nullptr;
+		}
+		
+		*length = this->bufferSize;
+		return data;
+	}
+
+	virtual void Release() override {
+		if (data != nullptr) {
+			delete[] data;
+			data = nullptr;
+		}
+	}
+};
+
+struct FrameTask : public BaseTask {
 	int size;
+	GLsync fence;
+	GLuint texture;
+	GLuint fbo;
+	GLuint pbo;
+	void* data = nullptr;
+	int miplevel;
 	int height;
 	int width;
 	int depth;
 	GLint internal_format;
+	virtual void StartRequest() override {
+		// Get texture informations
+		glBindTexture(GL_TEXTURE_2D, texture);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, miplevel, GL_TEXTURE_WIDTH, &(width));
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, miplevel, GL_TEXTURE_HEIGHT, &(height));
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, miplevel, GL_TEXTURE_DEPTH, &(depth));
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, miplevel, GL_TEXTURE_INTERNAL_FORMAT, &(internal_format));
+		size = depth * width * height * getPixelSizeFromInternalFormat(internal_format);
+
+		// Check for errors
+		if (size == 0
+			|| getFormatFromInternalFormat(internal_format) == 0
+			|| getTypeFromInternalFormat(internal_format) == 0) {
+			error = true;
+		}
+
+		// Allocate the final data buffer !!! WARNING: free, will have to be done on script side !!!!
+		data = new char[size];
+
+		// Create the fbo (frame buffer object) from the given texture
+		glGenFramebuffers(1, &(fbo));
+
+		// Bind the texture to the fbo
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+		glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture, 0);
+
+		// Create and bind pbo (pixel buffer object) to fbo
+		glGenBuffers(1, &(pbo));
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+		glBufferData(GL_PIXEL_PACK_BUFFER, size, 0, GL_DYNAMIC_READ);
+
+		// Start the read request
+		glReadBuffer(GL_COLOR_ATTACHMENT0);
+		glReadPixels(0, 0, width, height, getFormatFromInternalFormat(internal_format), getTypeFromInternalFormat(internal_format), 0);
+
+		// Unbind buffers
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+		// Fence to know when it's ready
+		fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+	}
+
+	virtual void Update() override {
+		// Check fence state
+		GLint status = 0;
+		GLsizei length = 0;
+		glGetSynciv(fence, GL_SYNC_STATUS, sizeof(GLint), &length, &status);
+		if (length <= 0) {
+			error = true;
+			done = true;
+			return;
+		}
+
+		// When it's done
+		if (status == GL_SIGNALED) {
+
+			// Bind back the pbo
+			glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+
+			// Map the buffer and copy it to data
+			void* ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, size, GL_MAP_READ_BIT);
+			std::memcpy(data, ptr, size);
+
+			// Unmap and unbind
+			glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+			glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+			// Clear buffers
+			glDeleteFramebuffers(1, &(fbo));
+			glDeleteBuffers(1, &(pbo));
+			glDeleteSync(fence);
+
+			// yeah task is done!
+			done = true;
+		}
+	}
+
+	virtual void* GetData(size_t* length) {
+		if (!done) {
+			return nullptr;
+		}
+		*length = size;
+		return data;
+	}
+
+	virtual void Release() override {
+		if (data != nullptr) {
+			delete[] data;
+			data = nullptr;
+		}
+	}
 };
 
 static IUnityInterfaces* unity_interfaces = NULL;
 static IUnityGraphics* graphics = NULL;
 static UnityGfxRenderer renderer = kUnityGfxRendererNull;
 
-static std::map<int,std::shared_ptr<Task>> tasks;
+static std::map<int,std::shared_ptr<BaseTask>> tasks;
 static std::mutex tasks_mutex;
 int next_event_id = 1;
 
 static void UNITY_INTERFACE_API OnGraphicsDeviceEvent(UnityGfxDeviceEventType eventType);
-
-
-
 
 #ifdef DEBUG
 std::ofstream logMain, logRender;
@@ -82,9 +266,11 @@ void GLAPIENTRY DebugMessageCallback( GLenum source,
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
     UnityPluginLoad(IUnityInterfaces* unityInterfaces)
 {
+	glewInit();
+
 	#ifdef DEBUG
-		logMain.open("/tmp/AsyncGPUReadbackPlugin_main.log", std::ios_base::app);
-		logRender.open("/tmp/AsyncGPUReadbackPlugin_render.log", std::ios_base::app);
+		logMain.open("AsyncGPUReadbackPlugin_main.log", std::fstream::out);
+		logRender.open("AsyncGPUReadbackPlugin_render.log", std::fstream::out);
 
 		glEnable              ( GL_DEBUG_OUTPUT );
 		glDebugMessageCallback( DebugMessageCallback, 0 );
@@ -92,7 +278,6 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 
     unityInterfaces = unityInterfaces;
     graphics = unityInterfaces->Get<IUnityGraphics>();
-        
     graphics->RegisterDeviceEventCallback(OnGraphicsDeviceEvent);
         
     // Run OnGraphicsDeviceEvent(initialize) manually on plugin load
@@ -128,26 +313,15 @@ static void UNITY_INTERFACE_API OnGraphicsDeviceEvent(UnityGfxDeviceEventType ev
 
 
 /**
- * Check if plugin is compatible with this system
- * This plugin is only compatible with opengl core
- */
-extern "C" bool isCompatible() {
+* Check if plugin is compatible with this system
+* This plugin is only compatible with opengl core
+*/
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API isCompatible() {
 	return (renderer == kUnityGfxRendererOpenGLCore);
 }
 
-/**
- * @brief Init of the make request action.
- * You then have to call makeRequest_renderThread
- * via GL.IssuePluginEvent with the returned event_id
- * 
- * @param texture OpenGL texture id
- * @return event_id to give to other functions and to IssuePluginEvent
- */
-extern "C" int makeRequest_mainThread(GLuint texture, int miplevel) {
-	// Create the task
-	std::shared_ptr<Task> task = std::make_shared<Task>();
-	task->texture = texture;
-	task->miplevel = miplevel;
+
+int InsertEvent(std::shared_ptr<BaseTask> task) {
 	int event_id = next_event_id;
 	next_event_id++;
 
@@ -160,65 +334,45 @@ extern "C" int makeRequest_mainThread(GLuint texture, int miplevel) {
 }
 
 /**
+* @brief Init of the make request action.
+* You then have to call makeRequest_renderThread
+* via GL.IssuePluginEvent with the returned event_id
+*
+* @param texture OpenGL texture id
+* @return event_id to give to other functions and to IssuePluginEvent
+*/
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API makeRequest_mainThread(GLuint texture, int miplevel) {
+	// Create the task
+	std::shared_ptr<FrameTask> task = std::make_shared<FrameTask>();
+	task->texture = texture;
+	task->miplevel = miplevel;
+	return InsertEvent(task);
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API RequestComputeBufferMainThread(GLuint computeBuffer, GLint bufferSize) {
+	// Create the task
+	std::shared_ptr<SsboTask> task = std::make_shared<SsboTask>();
+	task->Init(computeBuffer, bufferSize);
+	return InsertEvent(task);
+}
+
+/**
  * @brief Create a a read texture request
  * Has to be called by GL.IssuePluginEvent
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
-extern "C" void UNITY_INTERFACE_API makeRequest_renderThread(int event_id) {
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API KickstartRequestInRenderThread(int event_id) {
 	// Get task back
 	tasks_mutex.lock();
-	std::shared_ptr<Task> task = tasks[event_id];
+	std::shared_ptr<BaseTask> task = tasks[event_id];
 	tasks_mutex.unlock();
-
-	// Get texture informations
-	glBindTexture(GL_TEXTURE_2D, task->texture);
-	glGetTexLevelParameteriv(GL_TEXTURE_2D, task->miplevel, GL_TEXTURE_WIDTH, &(task->width));
-	glGetTexLevelParameteriv(GL_TEXTURE_2D, task->miplevel, GL_TEXTURE_HEIGHT, &(task->height));
-	glGetTexLevelParameteriv(GL_TEXTURE_2D, task->miplevel, GL_TEXTURE_DEPTH, &(task->depth));
-	glGetTexLevelParameteriv(GL_TEXTURE_2D, task->miplevel, GL_TEXTURE_INTERNAL_FORMAT, &(task->internal_format));
-	task->size = task->depth * task->width * task->height * getPixelSizeFromInternalFormat(task->internal_format);
-
-	// Check for errors
-	if (task->size == 0
-		|| getFormatFromInternalFormat(task->internal_format) == 0
-		|| getTypeFromInternalFormat(task->internal_format) == 0) {
-		task->error = true;
-		return;
-	}
-
-	// Allocate the final data buffer !!! WARNING: free, will have to be done on script side !!!!
-	task->data = std::malloc(task->size);
-
-	// Create the fbo (frame buffer object) from the given texture
-	task->fbo;
-	glGenFramebuffers(1, &(task->fbo));
-
-	// Bind the texture to the fbo
-	glBindFramebuffer(GL_FRAMEBUFFER, task->fbo);
-	glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, task->texture, 0);
-
-	// Create and bind pbo (pixel buffer object) to fbo
-	task->pbo;
-	glGenBuffers(1, &(task->pbo));
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, task->pbo);
-	glBufferData(GL_PIXEL_PACK_BUFFER, task->size, 0, GL_DYNAMIC_READ);
-
-	// Start the read request
-	glReadBuffer(GL_COLOR_ATTACHMENT0);
-	glReadPixels(0, 0, task->width, task->height, getFormatFromInternalFormat(task->internal_format), getTypeFromInternalFormat(task->internal_format), 0);
-
-	// Unbind buffers
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	// Fence to know when it's ready
-	task->fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-	
+	task->StartRequest();
 	// Done init
 	task->initialized = true;
 }
+
 extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getfunction_makeRequest_renderThread() {
-	return makeRequest_renderThread;
+	return KickstartRequestInRenderThread;
 }
 
 /**
@@ -226,10 +380,10 @@ extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getfun
  * Has to be called by GL.IssuePluginEvent
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
-extern "C" void UNITY_INTERFACE_API update_renderThread(int event_id) {
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API update_renderThread(int event_id) {
 	// Get task back
 	tasks_mutex.lock();
-	std::shared_ptr<Task> task = tasks[event_id];
+	std::shared_ptr<BaseTask> task = tasks[event_id];
 	tasks_mutex.unlock();
 
 	// Check if task has not been already deleted by main thread
@@ -242,39 +396,9 @@ extern "C" void UNITY_INTERFACE_API update_renderThread(int event_id) {
 		return;
 	}
 
-	// Check fence state
-	GLint status = 0;
-	GLsizei length = 0;
-	glGetSynciv(task->fence, GL_SYNC_STATUS, sizeof(GLint), &length, &status);
-	if (length <= 0) {
-		task->error = true;
-		task->done = true;
-		return;
-	}
-
-	// When it's done
-	if (status == GL_SIGNALED) {
-
-		// Bind back the pbo
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, task->pbo);
-
-		// Map the buffer and copy it to data
-		void* ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, task->size, GL_MAP_READ_BIT);
-		std::memcpy(task->data, ptr, task->size);
-
-		// Unmap and unbind
-		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-
-		// Clear buffers
-		glDeleteFramebuffers(1, &(task->fbo));
-		glDeleteBuffers(1, &(task->pbo));
-		glDeleteSync(task->fence);
-
-		// yeah task is done!
-		task->done = true;
-	}
+	task->Update();
 }
+
 extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getfunction_update_renderThread() {
 	return update_renderThread;
 }
@@ -283,10 +407,10 @@ extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getfun
  * @brief Get data from the main thread
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
-extern "C" void getData_mainThread(int event_id, void** buffer, size_t* length) {
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getData_mainThread(int event_id, void** buffer, size_t* length) {
 	// Get task back
 	tasks_mutex.lock();
-	std::shared_ptr<Task> task = tasks[event_id];
+	std::shared_ptr<BaseTask> task = tasks[event_id];
 	tasks_mutex.unlock();
 
 	// Do something only if initialized (thread safety)
@@ -295,18 +419,18 @@ extern "C" void getData_mainThread(int event_id, void** buffer, size_t* length) 
 	}
 
 	// Copy the pointer. Warning: free will have to be done on script side
-	*length = task->size;
-	*buffer = task->data;
+	auto dataPtr = task->GetData(length);
+	*buffer = dataPtr;
 }
 
 /**
  * @brief Check if request is done
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
-extern "C" bool isRequestDone(int event_id) {
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API isRequestDone(int event_id) {
 	// Get task back
 	tasks_mutex.lock();
-	std::shared_ptr<Task> task = tasks[event_id];
+	std::shared_ptr<BaseTask> task = tasks[event_id];
 	tasks_mutex.unlock();
 
 	return task->done;
@@ -316,10 +440,10 @@ extern "C" bool isRequestDone(int event_id) {
  * @brief Check if request is in error
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
-extern "C" bool isRequestError(int event_id) {
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API isRequestError(int event_id) {
 	// Get task back
 	tasks_mutex.lock();
-	std::shared_ptr<Task> task = tasks[event_id];
+	std::shared_ptr<BaseTask> task = tasks[event_id];
 	tasks_mutex.unlock();
 
 	return task->error;
@@ -331,11 +455,11 @@ extern "C" bool isRequestError(int event_id) {
  * Has to be called by GL.IssuePluginEvent
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
-extern "C" void dispose(int event_id) {
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API dispose(int event_id) {
 	// Remove from tasks
 	tasks_mutex.lock();
-	std::shared_ptr<Task> task = tasks[event_id];
-	std::free(task->data);
+	std::shared_ptr<BaseTask> task = tasks[event_id];
+	task->Release();
 	tasks.erase(event_id);
 	tasks_mutex.unlock();
 }

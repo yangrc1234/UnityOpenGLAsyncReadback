@@ -10,13 +10,14 @@ using Unity.Collections.LowLevel.Unsafe;
 namespace AsyncGPUReadbackPluginNs {
 
 	// Tries to match the official API
-	public class AsyncGPUReadbackPlugin
-	{
-		public static AsyncGPUReadbackPluginRequest Request(Texture src)
-		{
-			return new AsyncGPUReadbackPluginRequest(src);
-		}
-	}
+	public class AsyncGPUReadbackPlugin {
+        public static AsyncGPUReadbackPluginRequest Request(Texture src) {
+            return new AsyncGPUReadbackPluginRequest(src);
+        }
+        public static AsyncGPUReadbackPluginRequest Request(ComputeBuffer computeBuffer) {
+            return new AsyncGPUReadbackPluginRequest(computeBuffer);
+        }
+    }
 
 	public class AsyncGPUReadbackPluginRequest
 	{
@@ -73,7 +74,28 @@ namespace AsyncGPUReadbackPluginNs {
 	        }
 	    }
 
-		/// <summary>
+        /// <summary>
+        /// Create an AsyncGPUReadbackPluginRequest.
+        /// Use official AsyncGPUReadback.Request if possible.
+        /// If not, it tries to use OpenGL specific implementation
+        /// Warning! Can only be called from render thread yet (not main thread)
+        /// </summary>
+        /// <param name="src"></param>
+        /// <returns></returns>
+        public AsyncGPUReadbackPluginRequest(Texture src) {
+            if (SystemInfo.supportsAsyncGPUReadback) {
+                usePlugin = false;
+                gpuRequest = AsyncGPUReadback.Request(src);
+            } else if (isCompatible()) {
+                usePlugin = true;
+                int textureId = (int)(src.GetNativeTexturePtr());
+                this.eventId = makeRequest_mainThread(textureId, 0);
+                GL.IssuePluginEvent(getfunction_makeRequest_renderThread(), this.eventId);
+            } else {
+                Debug.LogError("AsyncGPUReadback is not supported on your system.");
+            }
+        }
+        /// <summary>
 		/// Create an AsyncGPUReadbackPluginRequest.
 		/// Use official AsyncGPUReadback.Request if possible.
 		/// If not, it tries to use OpenGL specific implementation
@@ -81,31 +103,28 @@ namespace AsyncGPUReadbackPluginNs {
 		/// </summary>
 		/// <param name="src"></param>
 		/// <returns></returns>
-		public AsyncGPUReadbackPluginRequest(Texture src)
-		{
-			if (SystemInfo.supportsAsyncGPUReadback) {
-				usePlugin = false;
-				gpuRequest = AsyncGPUReadback.Request(src);
-			}
-			else if(isCompatible()) {
-				usePlugin = true;
-				int textureId = (int)(src.GetNativeTexturePtr());
-				this.eventId = makeRequest_mainThread(textureId, 0);
-				GL.IssuePluginEvent(getfunction_makeRequest_renderThread(), this.eventId);
-			}
-			else {
-				Debug.LogError("AsyncGPUReadback is not supported on your system.");
-			}
-		}
+		public AsyncGPUReadbackPluginRequest(ComputeBuffer src) {
+            if (SystemInfo.supportsAsyncGPUReadback) {
+                usePlugin = false;
+                gpuRequest = AsyncGPUReadback.Request(src);
+            } else if (isCompatible()) {
+                usePlugin = true;
+                int textureId = (int)(src.GetNativeBufferPtr());
+                this.eventId = RequestComputeBufferMainThread(textureId, src.count * src.stride);
+                GL.IssuePluginEvent(getfunction_makeRequest_renderThread(), this.eventId);
+            } else {
+                Debug.LogError("AsyncGPUReadback is not supported on your system.");
+            }
+        }
 
-		public unsafe byte[] GetRawData()
+        public unsafe byte[] GetRawData()
 		{
 			if (usePlugin) {
 				// Get data from cpp plugin
 				void* ptr = null;
 				int length = 0;
 				getData_mainThread(this.eventId, ref ptr, ref length);
-
+                
 				// Copy data to a buffer that we own and that will not be deleted
 				byte[] buffer = new byte[length];
 				Marshal.Copy(new IntPtr(ptr), buffer, 0, length);
@@ -147,9 +166,11 @@ namespace AsyncGPUReadbackPluginNs {
 
 		[DllImport ("AsyncGPUReadbackPlugin")]
 		private static extern bool isCompatible();
-		[DllImport ("AsyncGPUReadbackPlugin")]
-		private static extern int makeRequest_mainThread(int texture, int miplevel);
-		[DllImport ("AsyncGPUReadbackPlugin")]
+        [DllImport("AsyncGPUReadbackPlugin")]
+        private static extern int makeRequest_mainThread(int texture, int miplevel);
+        [DllImport("AsyncGPUReadbackPlugin")]
+        private static extern int RequestComputeBufferMainThread(int bufferID, int bufferSize);
+        [DllImport ("AsyncGPUReadbackPlugin")]
 		private static extern IntPtr getfunction_makeRequest_renderThread();
 		[DllImport ("AsyncGPUReadbackPlugin")]
 		private static extern void makeRequest_renderThread(int event_id);
