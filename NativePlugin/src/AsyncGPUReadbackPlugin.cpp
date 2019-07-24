@@ -221,7 +221,6 @@ struct FrameTask : public BaseTask {
 	}
 };
 
-static IUnityInterfaces* unity_interfaces = NULL;
 static IUnityGraphics* graphics = NULL;
 static UnityGfxRenderer renderer = kUnityGfxRendererNull;
 
