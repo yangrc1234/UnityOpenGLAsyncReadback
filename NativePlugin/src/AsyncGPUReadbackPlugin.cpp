@@ -32,12 +32,12 @@ struct BaseTask {
 struct SsboTask : public BaseTask {
 	GLuint ssbo;
 	GLuint pbo;
-	void* data = nullptr;
+	char* data = nullptr;
 	GLsync fence;
 	GLint bufferSize;
-	void Init(GLuint ssbo, GLint bufferSize) {
-		this->ssbo = ssbo;
-		this->bufferSize = bufferSize;
+	void Init(GLuint _ssbo, GLint _bufferSize) {
+		this->ssbo = _ssbo;
+		this->bufferSize = _bufferSize;
 	}
 
 	virtual void StartRequest() override {
@@ -121,7 +121,7 @@ struct FrameTask : public BaseTask {
 	GLuint texture;
 	GLuint fbo;
 	GLuint pbo;
-	void* data = nullptr;
+	char* data = nullptr;
 	int miplevel;
 	int height;
 	int width;
