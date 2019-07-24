@@ -61,7 +61,7 @@ struct SsboTask : public BaseTask {
 		fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 	}
 
-	virtual void Update() {
+	virtual void Update() override {
 		// Check fence state
 		GLint status = 0;
 		GLsizei length = 0;
@@ -205,7 +205,7 @@ struct FrameTask : public BaseTask {
 		}
 	}
 
-	virtual void* GetData(size_t* length) {
+	virtual void* GetData(size_t* length) override {
 		if (!done) {
 			return nullptr;
 		}
