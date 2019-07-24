@@ -7,55 +7,138 @@ using UnityEngine.Rendering;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 
-namespace AsyncGPUReadbackPluginNs {
+namespace Yangrc.OpenGLAsyncReadback {
 
-	// Tries to match the official API
-	public class AsyncGPUReadbackPlugin {
-        public static AsyncGPUReadbackPluginRequest Request(Texture src) {
-            return new AsyncGPUReadbackPluginRequest(src);
+    /// <summary>
+    /// Helper struct that wraps unity async readback and our opengl readback together, to hide difference
+    /// </summary>
+    public struct UniversalAsyncGPUReadbackRequest {
+
+        public static UniversalAsyncGPUReadbackRequest Request(Texture src, int mipmapIndex = 0) {
+            if (SystemInfo.supportsAsyncGPUReadback) {
+
+                return new UniversalAsyncGPUReadbackRequest() {
+                    isPlugin = false,
+                    uDisposd = false,
+                    uRequest = AsyncGPUReadback.Request(src, mipIndex: mipmapIndex),
+                };
+            } else {
+                return new UniversalAsyncGPUReadbackRequest() {
+                    isPlugin = true,
+                    oRequest = new OpenGLAsyncReadbackRequest(src, mipmapIndex),
+                };  
+            }
         }
-        public static AsyncGPUReadbackPluginRequest Request(ComputeBuffer computeBuffer) {
-            return new AsyncGPUReadbackPluginRequest(computeBuffer);
+
+        public static UniversalAsyncGPUReadbackRequest Request(ComputeBuffer computeBuffer) {
+            if (SystemInfo.supportsAsyncGPUReadback) {
+                return new UniversalAsyncGPUReadbackRequest() {
+                    isPlugin = false,
+                    uInited = true,
+                    uDisposd = false,
+                    uRequest = AsyncGPUReadback.Request(computeBuffer),
+                };
+            } else {
+                return new UniversalAsyncGPUReadbackRequest() {
+                    isPlugin = true,
+                    oRequest = new OpenGLAsyncReadbackRequest(computeBuffer),
+                };
+            }
         }
+
+        public void Update() {
+            if (isPlugin) {
+                oRequest.Update();
+            } else {
+                uRequest.Update();
+            }
+        }
+
+        public bool done {
+            get {
+                if (isPlugin) {
+                    return oRequest.done;
+                } else {
+                    return uRequest.done;
+                }
+            }
+        }
+
+        public bool hasError {
+            get {
+                if (isPlugin) {
+                    return oRequest.hasError;
+                } else {
+                    return uRequest.hasError;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Release memory of completed request.  
+        /// <para>
+        /// When used in unity's readback, this method just marks the request as disposed, since unity will handle it.
+        /// </para>
+        /// </summary>
+        public void Dispose() {
+            if (isPlugin) {
+                oRequest.Dispose();
+            } else {
+                uDisposd = true;
+                //Don't care.
+            }
+        }
+
+        /// <summary>
+        /// Get data of a readback request.  
+        /// The data is allocated as temp, so it only stay alive for one frame.
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <returns></returns>
+        public NativeArray<T> GetData<T>()  where T:struct{
+            if (isPlugin) {
+                return oRequest.GetRawData<T>();
+            } else {
+                return uRequest.GetData<T>();
+            }
+        }
+
+        public bool valid {
+            get {
+                return isPlugin ? oRequest.Valid() : (!uDisposd && uInited);
+            }
+        }
+
+        public bool isPlugin { get; private set; }
+
+        //fields for unity request.
+        private bool uInited;
+        private bool uDisposd;
+        private AsyncGPUReadbackRequest uRequest;
+
+        //fields for opengl request.
+        private OpenGLAsyncReadbackRequest oRequest;
+
     }
 
-	public class AsyncGPUReadbackPluginRequest
-	{
-		
-		/// <summary>
-		/// Tell if we are using the plugin api or the official api
-		/// </summary>
-		private bool usePlugin;
-
-		/// <summary>
-		/// Official api request object used if supported
-		/// </summary>
-		private AsyncGPUReadbackRequest gpuRequest;
-
-		/// <summary>
-		/// Event Id used to tell what texture is targeted to the render thread
-		/// </summary>
-		private int eventId;
-
-		/// <summary>
-		/// Is buffer allocated
-		/// </summary>
-		private bool bufferCreated = false;
+	internal struct OpenGLAsyncReadbackRequest {
+        public static bool IsAvailable() {
+            return SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLCore;  //Not tested on es3 yet.
+        }
+        /// <summary>
+        /// Identify native task object handling the request.
+        /// </summary>
+        private int nativeTaskHandle;
 
 		/// <summary>
 		/// Check if the request is done
 		/// </summary>
 		public bool done
 	    {
-	        get
-	        {
-				if (usePlugin) {
-					return isRequestDone(eventId);
-				}
-				else {
-					return gpuRequest.done;
-				}
-	        }
+	        get {
+                AssertRequestValid();
+                return isRequestDone(nativeTaskHandle);
+            }
 	    }
 
 		/// <summary>
@@ -63,124 +146,85 @@ namespace AsyncGPUReadbackPluginNs {
 		/// </summary>
 		public bool hasError
 	    {
-	        get
-	        {
-				if (usePlugin) {
-					return isRequestError(eventId);
-				}
-				else {
-					return gpuRequest.hasError;
-				}
-	        }
+	        get {
+                AssertRequestValid();
+                return isRequestError(nativeTaskHandle);
+            }
 	    }
 
-        /// <summary>
-        /// Create an AsyncGPUReadbackPluginRequest.
-        /// Use official AsyncGPUReadback.Request if possible.
-        /// If not, it tries to use OpenGL specific implementation
-        /// Warning! Can only be called from render thread yet (not main thread)
-        /// </summary>
-        /// <param name="src"></param>
-        /// <returns></returns>
-        public AsyncGPUReadbackPluginRequest(Texture src) {
-            if (SystemInfo.supportsAsyncGPUReadback) {
-                usePlugin = false;
-                gpuRequest = AsyncGPUReadback.Request(src);
-            } else if (isCompatible()) {
-                usePlugin = true;
-                int textureId = (int)(src.GetNativeTexturePtr());
-                this.eventId = makeRequest_mainThread(textureId, 0);
-                GL.IssuePluginEvent(getfunction_makeRequest_renderThread(), this.eventId);
-            } else {
-                Debug.LogError("AsyncGPUReadback is not supported on your system.");
-            }
+        public OpenGLAsyncReadbackRequest(Texture src, int mipmapLevel = 0) {
+            int textureId = (int)(src.GetNativeTexturePtr());
+            this.nativeTaskHandle = RequestTextureMainThread(textureId, mipmapLevel);
+            GL.IssuePluginEvent(GetKickstartFunctionPtr(), this.nativeTaskHandle);
         }
-        /// <summary>
-		/// Create an AsyncGPUReadbackPluginRequest.
-		/// Use official AsyncGPUReadback.Request if possible.
-		/// If not, it tries to use OpenGL specific implementation
-		/// Warning! Can only be called from render thread yet (not main thread)
-		/// </summary>
-		/// <param name="src"></param>
-		/// <returns></returns>
-		public AsyncGPUReadbackPluginRequest(ComputeBuffer src) {
-            if (SystemInfo.supportsAsyncGPUReadback) {
-                usePlugin = false;
-                gpuRequest = AsyncGPUReadback.Request(src);
-            } else if (isCompatible()) {
-                usePlugin = true;
-                int textureId = (int)(src.GetNativeBufferPtr());
-                this.eventId = RequestComputeBufferMainThread(textureId, src.count * src.stride);
-                GL.IssuePluginEvent(getfunction_makeRequest_renderThread(), this.eventId);
-            } else {
-                Debug.LogError("AsyncGPUReadback is not supported on your system.");
+
+		public OpenGLAsyncReadbackRequest(ComputeBuffer src) {
+            int textureId = (int)(src.GetNativeBufferPtr());
+            this.nativeTaskHandle = RequestComputeBufferMainThread(textureId, src.count * src.stride);
+            GL.IssuePluginEvent(GetKickstartFunctionPtr(), this.nativeTaskHandle);
+        }
+
+        public bool Valid() {
+            return RequestExists(this.nativeTaskHandle);
+        }
+
+        private void AssertRequestValid() {
+            if (!Valid()) {
+                throw new UnityException("The request is not valid!");
             }
         }
 
-        public unsafe byte[] GetRawData()
+        public unsafe NativeArray<T> GetRawData<T>() where T:struct
 		{
-			if (usePlugin) {
-				// Get data from cpp plugin
-				void* ptr = null;
-				int length = 0;
-				getData_mainThread(this.eventId, ref ptr, ref length);
-                
-				// Copy data to a buffer that we own and that will not be deleted
-				byte[] buffer = new byte[length];
-				Marshal.Copy(new IntPtr(ptr), buffer, 0, length);
-				bufferCreated = true;
+            AssertRequestValid();
+            if (!done) {
+                throw new InvalidOperationException("The request is not done yet!");
+            }
+			// Get data from cpp plugin
+			void* ptr = null;
+			int length = 0;
+			getData_mainThread(this.nativeTaskHandle, ref ptr, ref length);
 
-				return buffer;
-			}
-			else {
-				return gpuRequest.GetData<byte>().ToArray();
-			}
+            //Copy data from plugin native memory to unity-controlled native memory.
+            var resultNativeArray = new NativeArray<T>(length / UnsafeUtility.SizeOf<T>(), Allocator.Temp);
+            UnsafeUtility.MemMove(resultNativeArray.GetUnsafePtr(), ptr, length);
+            //Though there exists an api named NativeArrayUnsafeUtility.ConvertExistingDataToNativeArray.
+            //It's only for internal use. The document on docs.unity3d.com is a lie.
+            
+            return resultNativeArray;
 		}
 
-		/// <summary>
-		/// Has to be called regularly to update request status.
-		/// Call this from Update() or from a corountine
-		/// </summary>
-		/// <param name="force">Update is automatic on official api,
-		/// so we don't call the Update() method except on force mode.</param>
 		public void Update(bool force = false)
 		{
-			if (usePlugin) {
-				GL.IssuePluginEvent(getfunction_update_renderThread(), this.eventId);
-			}
-			else if(force) {
-				gpuRequest.Update();
-			}
+            AssertRequestValid();
+            GL.IssuePluginEvent(getfunction_update_renderThread(), this.nativeTaskHandle);
 		}
 
 		/// <summary>
 		/// Has to be called to free the allocated buffer after it has been used
 		/// </summary>
-		public void Dispose()
-		{
-			if (usePlugin && bufferCreated) {
-				dispose(this.eventId);
-			}
-		}
-
+		public void Dispose() {
+            AssertRequestValid();
+            dispose(this.nativeTaskHandle);
+        }
 
 		[DllImport ("AsyncGPUReadbackPlugin")]
 		private static extern bool isCompatible();
         [DllImport("AsyncGPUReadbackPlugin")]
-        private static extern int makeRequest_mainThread(int texture, int miplevel);
+        private static extern int RequestTextureMainThread(int texture, int miplevel);
         [DllImport("AsyncGPUReadbackPlugin")]
         private static extern int RequestComputeBufferMainThread(int bufferID, int bufferSize);
         [DllImport ("AsyncGPUReadbackPlugin")]
-		private static extern IntPtr getfunction_makeRequest_renderThread();
-		[DllImport ("AsyncGPUReadbackPlugin")]
-		private static extern void makeRequest_renderThread(int event_id);
+		private static extern IntPtr GetKickstartFunctionPtr();
 		[DllImport ("AsyncGPUReadbackPlugin")]
 		private static extern IntPtr getfunction_update_renderThread();
 		[DllImport ("AsyncGPUReadbackPlugin")]
 		private static extern unsafe void getData_mainThread(int event_id, ref void* buffer, ref int length);
-		[DllImport ("AsyncGPUReadbackPlugin")]
-		private static extern bool isRequestError(int event_id);
-		[DllImport ("AsyncGPUReadbackPlugin")]
+        [DllImport("AsyncGPUReadbackPlugin")]
+        private static extern bool isRequestError(int event_id);
+        [DllImport("AsyncGPUReadbackPlugin")]
+        private static extern bool RequestExists(int event_id);
+        [DllImport ("AsyncGPUReadbackPlugin")]
 		private static extern bool isRequestDone(int event_id);
 		[DllImport ("AsyncGPUReadbackPlugin")]
 		private static extern void dispose(int event_id);

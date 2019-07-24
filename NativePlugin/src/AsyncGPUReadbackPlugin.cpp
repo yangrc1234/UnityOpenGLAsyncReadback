@@ -9,11 +9,14 @@
 #include "TypeHelpers.hpp"
 #include <string>
 
-#define DEBUG 1
 #ifdef DEBUG
 	#include <fstream>
 	#include <thread>
 #endif
+
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API isCompatible();
+static void UNITY_INTERFACE_API OnGraphicsDeviceEvent(UnityGfxDeviceEventType eventType);
+
 
 struct BaseTask {
 	bool initialized = false;
@@ -23,7 +26,7 @@ struct BaseTask {
 	virtual void StartRequest() = 0;
 	virtual void Update() = 0;
 	virtual void* GetData(size_t* length) = 0;
-	virtual void Release() = 0;
+	virtual void ReleaseData() = 0;
 };
 
 struct SsboTask : public BaseTask {
@@ -56,9 +59,6 @@ struct SsboTask : public BaseTask {
 
 		//Create a fence.
 		fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-
-		// Allocate the final data buffer !!! WARNING: free, will have to be done on script side !!!!
-		data = new char[bufferSize];
 	}
 
 	virtual void Update() {
@@ -80,6 +80,9 @@ struct SsboTask : public BaseTask {
 
 			// Map the buffer and copy it to data
 			void* ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bufferSize, GL_MAP_READ_BIT);
+
+			// Allocate the final data buffer !!! WARNING: free, will have to be done on script side !!!!
+			data = new char[bufferSize];
 			std::memcpy(data, ptr, bufferSize);
 
 			// Unmap and unbind
@@ -104,7 +107,7 @@ struct SsboTask : public BaseTask {
 		return data;
 	}
 
-	virtual void Release() override {
+	virtual void ReleaseData() override {
 		if (data != nullptr) {
 			delete[] data;
 			data = nullptr;
@@ -210,7 +213,7 @@ struct FrameTask : public BaseTask {
 		return data;
 	}
 
-	virtual void Release() override {
+	virtual void ReleaseData() override {
 		if (data != nullptr) {
 			delete[] data;
 			data = nullptr;
@@ -225,40 +228,7 @@ static UnityGfxRenderer renderer = kUnityGfxRendererNull;
 static std::map<int,std::shared_ptr<BaseTask>> tasks;
 static std::mutex tasks_mutex;
 int next_event_id = 1;
-
-static void UNITY_INTERFACE_API OnGraphicsDeviceEvent(UnityGfxDeviceEventType eventType);
-
-#ifdef DEBUG
-std::ofstream logMain, logRender;
-
-/**
- * @brief Debug log function. Log to /tmp/AsyncGPUReadbackPlugin.log
- * 
- * @param message 
- */
-void logToFile(std::string message) {
-	std::ofstream outfile;
-	outfile.open("/tmp/AsyncGPUReadbackPlugin_main.log", std::ios_base::app);
-	outfile << "GL CALLBACK: " << message  << std::endl;
-	outfile.close();
-}
-
-/**
- * OpenGL debug message callback
- */
-void GLAPIENTRY DebugMessageCallback( GLenum source,
-                 GLenum type,
-                 GLuint id,
-                 GLenum severity,
-                 GLsizei length,
-                 const GLchar* message,
-                 const void* userParam)
-{
-	if (type == GL_DEBUG_TYPE_ERROR) {
-		logRender << "GL CALLBACK: " << message  << std::endl;
-	}
-}
-#endif
+static bool inited = false;
 
 /**
  * Unity plugin load event
@@ -266,23 +236,17 @@ void GLAPIENTRY DebugMessageCallback( GLenum source,
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
     UnityPluginLoad(IUnityInterfaces* unityInterfaces)
 {
-	glewInit();
-
-	#ifdef DEBUG
-		logMain.open("AsyncGPUReadbackPlugin_main.log", std::fstream::out);
-		logRender.open("AsyncGPUReadbackPlugin_render.log", std::fstream::out);
-
-		glEnable              ( GL_DEBUG_OUTPUT );
-		glDebugMessageCallback( DebugMessageCallback, 0 );
-	#endif
-
-    unityInterfaces = unityInterfaces;
     graphics = unityInterfaces->Get<IUnityGraphics>();
     graphics->RegisterDeviceEventCallback(OnGraphicsDeviceEvent);
         
     // Run OnGraphicsDeviceEvent(initialize) manually on plugin load
     // to not miss the event in case the graphics device is already initialized
     OnGraphicsDeviceEvent(kUnityGfxDeviceEventInitialize);
+
+	if (isCompatible()) {
+		inited = true;
+		glewInit();
+	}
 }
 
 /**
@@ -341,7 +305,7 @@ int InsertEvent(std::shared_ptr<BaseTask> task) {
 * @param texture OpenGL texture id
 * @return event_id to give to other functions and to IssuePluginEvent
 */
-extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API makeRequest_mainThread(GLuint texture, int miplevel) {
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API RequestTextureMainThread(GLuint texture, int miplevel) {
 	// Create the task
 	std::shared_ptr<FrameTask> task = std::make_shared<FrameTask>();
 	task->texture = texture;
@@ -371,7 +335,7 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API KickstartRequestInRen
 	task->initialized = true;
 }
 
-extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getfunction_makeRequest_renderThread() {
+extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API GetKickstartFunctionPtr() {
 	return KickstartRequestInRenderThread;
 }
 
@@ -404,7 +368,7 @@ extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getfun
 }
 
 /**
- * @brief Get data from the main thread
+ * @brief Get data from the main thread. The caller owns the data pointer now.
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getData_mainThread(int event_id, void** buffer, size_t* length) {
@@ -421,6 +385,19 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getData_mainThread(in
 	// Copy the pointer. Warning: free will have to be done on script side
 	auto dataPtr = task->GetData(length);
 	*buffer = dataPtr;
+}
+
+/**
+ * @brief Check if request exists
+ * @param event_id containing the the task index, given by makeRequest_mainThread
+ */
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API RequestExists(int event_id) {
+	// Get task back
+	tasks_mutex.lock();
+	bool result = tasks.find(event_id) != tasks.end();
+	tasks_mutex.unlock();
+
+	return result;
 }
 
 /**
@@ -451,7 +428,7 @@ extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API isRequestError(int ev
 
 /**
  * @brief clear data for a frame
- * Warning : Buffer is never cleaned, it has to be cleaned from script side 
+ * Warning : Buffer is never cleaned, it has to be cleaned from script side
  * Has to be called by GL.IssuePluginEvent
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
@@ -459,7 +436,7 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API dispose(int event_id)
 	// Remove from tasks
 	tasks_mutex.lock();
 	std::shared_ptr<BaseTask> task = tasks[event_id];
-	task->Release();
 	tasks.erase(event_id);
+	task->ReleaseData();
 	tasks_mutex.unlock();
 }

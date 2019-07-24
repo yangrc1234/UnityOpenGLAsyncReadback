@@ -1,34 +1,36 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-
+using Unity.Collections;
+using Yangrc.OpenGLAsyncReadback;
 public class ComputeBufferTest : MonoBehaviour
 {
+    NativeArray<float> test;
     ComputeBuffer t;
-    AsyncGPUReadbackPluginNs.AsyncGPUReadbackPluginRequest request;
+    UniversalAsyncGPUReadbackRequest request;
     // Start is called before the first frame update
     IEnumerator Start()
     {
         t = new ComputeBuffer(100, 4, ComputeBufferType.Default);
         var tempList = new List<float>();
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < 3; i++) {
             tempList.Add(i);
         }
         t.SetData(tempList);
         yield return null;
-        request = AsyncGPUReadbackPluginNs.AsyncGPUReadbackPlugin.Request(t);
+        request = UniversalAsyncGPUReadbackRequest.Request(t);
+        t.Dispose();
     }
 
     private void Update() {
-        if (request != null) {
+        if (request.valid) {
             request.Update();
             if (request.done) {
-                var rawData = request.GetRawData();
-                for (int i = 0; i < 100; i++) {
-                    Debug.Log(System.BitConverter.ToSingle(rawData, i * 4));
+                test = request.GetData<float>();
+                foreach (var item in test) {
+                    Debug.Log(item);
                 }
                 request.Dispose();
-                request = null;
             }
         }
     }

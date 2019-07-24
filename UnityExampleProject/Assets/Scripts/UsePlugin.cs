@@ -5,14 +5,14 @@ using System;
 using System.Runtime.InteropServices;
 using Unity.Collections;
 using System.IO;
-using AsyncGPUReadbackPluginNs;
+using Yangrc.OpenGLAsyncReadback;
 
 /// <summary>
 /// Exemple of usage inspirated from https://github.com/keijiro/AsyncCaptureTest/blob/master/Assets/AsyncCapture.cs
 /// </summary>
 public class UsePlugin : MonoBehaviour {
 
-	Queue<AsyncGPUReadbackPluginRequest> _requests = new Queue<AsyncGPUReadbackPluginRequest>();
+	Queue<UniversalAsyncGPUReadbackRequest> _requests = new Queue<UniversalAsyncGPUReadbackRequest>();
 
 	void Update()
     {
@@ -32,7 +32,7 @@ public class UsePlugin : MonoBehaviour {
             else if (req.done)
             {
                 // Get data from the request when it's done
-                byte[] buffer = req.GetRawData();
+                var buffer = req.GetData<byte>();
 
                 // Save the image
                 Camera cam = GetComponent<Camera>();
@@ -57,13 +57,13 @@ public class UsePlugin : MonoBehaviour {
         if (Time.frameCount % 60 == 0)
         {    
             if (_requests.Count < 8)
-                _requests.Enqueue(AsyncGPUReadbackPlugin.Request(source));
+                _requests.Enqueue(UniversalAsyncGPUReadbackRequest.Request(source));
             else
                 Debug.LogWarning("Too many requests.");
         }
     }
 
-    void SaveBitmap(byte[] buffer, int width, int height)
+    void SaveBitmap(NativeArray<byte> buffer, int width, int height)
     {
         Debug.Log("Write to file");
         var tex = new Texture2D(width, height, TextureFormat.RGBAHalf, false);
