@@ -146,6 +146,7 @@ inline int getFormatFromInternalFormat(int internalFormat)
 		case GL_RGBA16_SNORM:
 		case GL_RGBA16F:
 		case GL_RGBA32F:
+		case GL_SRGB8_ALPHA8:
 			return GL_RGBA;
 
 		case GL_RGBA8UI:
@@ -157,7 +158,6 @@ inline int getFormatFromInternalFormat(int internalFormat)
 			return GL_RGBA_INTEGER;
 
 		case GL_SRGB8:
-		case GL_SRGB8_ALPHA8:
 			return GL_RGB;
 	}
 	return 0;

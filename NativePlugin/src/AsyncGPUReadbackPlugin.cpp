@@ -134,10 +134,11 @@ struct FrameTask : public BaseTask {
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, miplevel, GL_TEXTURE_HEIGHT, &(height));
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, miplevel, GL_TEXTURE_DEPTH, &(depth));
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, miplevel, GL_TEXTURE_INTERNAL_FORMAT, &(internal_format));
-		size = depth * width * height * getPixelSizeFromInternalFormat(internal_format);
-
+		int pixelBits = getPixelSizeFromInternalFormat(internal_format);
+		size = depth * width * height * pixelBits / 8;
 		// Check for errors
 		if (size == 0
+			|| pixelBits % 8 != 0	//Only support textures aligned to one byte.
 			|| getFormatFromInternalFormat(internal_format) == 0
 			|| getTypeFromInternalFormat(internal_format) == 0) {
 			error = true;

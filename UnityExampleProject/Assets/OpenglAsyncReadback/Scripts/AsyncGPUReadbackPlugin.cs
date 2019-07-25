@@ -14,6 +14,12 @@ namespace Yangrc.OpenGLAsyncReadback {
     /// </summary>
     public struct UniversalAsyncGPUReadbackRequest {
 
+        /// <summary>
+        /// Request readback of a texture.
+        /// </summary>
+        /// <param name="src"></param>
+        /// <param name="mipmapIndex"></param>
+        /// <returns></returns>
         public static UniversalAsyncGPUReadbackRequest Request(Texture src, int mipmapIndex = 0) {
             if (SystemInfo.supportsAsyncGPUReadback) {
 
@@ -25,7 +31,7 @@ namespace Yangrc.OpenGLAsyncReadback {
             } else {
                 return new UniversalAsyncGPUReadbackRequest() {
                     isPlugin = true,
-                    oRequest = new OpenGLAsyncReadbackRequest(src, mipmapIndex),
+                    oRequest = OpenGLAsyncReadbackRequest.CreateTextureRequest((int)src.GetNativeTexturePtr(), 0)
                 };  
             }
         }
@@ -41,10 +47,25 @@ namespace Yangrc.OpenGLAsyncReadback {
             } else {
                 return new UniversalAsyncGPUReadbackRequest() {
                     isPlugin = true,
-                    oRequest = new OpenGLAsyncReadbackRequest(computeBuffer),
+                    oRequest = OpenGLAsyncReadbackRequest.CreateTextureRequest((int)computeBuffer.GetNativeBufferPtr(), 0),
                 };
             }
         }
+
+        public static UniversalAsyncGPUReadbackRequest OpenGLRequestTexture(int texture, int mipmapIndex) {
+            return new UniversalAsyncGPUReadbackRequest() {
+                isPlugin = true,
+                oRequest = OpenGLAsyncReadbackRequest.CreateTextureRequest((int)texture, 0)
+            };
+        }
+
+        public static UniversalAsyncGPUReadbackRequest OpenGLRequestComputeBuffer(int computeBuffer, int size) {
+            return new UniversalAsyncGPUReadbackRequest() {
+                isPlugin = true,
+                oRequest = OpenGLAsyncReadbackRequest.CreateComputeBufferRequest((int)computeBuffer, size)
+            };
+        }
+
 
         public void Update() {
             if (isPlugin) {
@@ -152,16 +173,17 @@ namespace Yangrc.OpenGLAsyncReadback {
             }
 	    }
 
-        public OpenGLAsyncReadbackRequest(Texture src, int mipmapLevel = 0) {
-            int textureId = (int)(src.GetNativeTexturePtr());
-            this.nativeTaskHandle = RequestTextureMainThread(textureId, mipmapLevel);
-            GL.IssuePluginEvent(GetKickstartFunctionPtr(), this.nativeTaskHandle);
+        public static OpenGLAsyncReadbackRequest CreateTextureRequest(int textureOpenGLName, int mipmapLevel) {
+            var result = new OpenGLAsyncReadbackRequest();
+            result.nativeTaskHandle = RequestTextureMainThread(textureOpenGLName, mipmapLevel);
+            GL.IssuePluginEvent(GetKickstartFunctionPtr(), result.nativeTaskHandle);
+            return result;
         }
-
-		public OpenGLAsyncReadbackRequest(ComputeBuffer src) {
-            int textureId = (int)(src.GetNativeBufferPtr());
-            this.nativeTaskHandle = RequestComputeBufferMainThread(textureId, src.count * src.stride);
-            GL.IssuePluginEvent(GetKickstartFunctionPtr(), this.nativeTaskHandle);
+        public static OpenGLAsyncReadbackRequest CreateComputeBufferRequest(int computeBufferOpenGLName, int size) {
+            var result = new OpenGLAsyncReadbackRequest();
+            result.nativeTaskHandle = RequestComputeBufferMainThread(computeBufferOpenGLName, size);
+            GL.IssuePluginEvent(GetKickstartFunctionPtr(), result.nativeTaskHandle);
+            return result;
         }
 
         public bool Valid() {
