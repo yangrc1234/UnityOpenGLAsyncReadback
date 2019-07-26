@@ -1,4 +1,5 @@
 #include <cstddef>
+#include <vector>
 #include <map>
 #include <mutex>
 #include <memory>
@@ -8,31 +9,102 @@
 #include <iostream>
 #include "TypeHelpers.hpp"
 #include <string>
+#include <atomic>
 
 #ifdef DEBUG
 	#include <fstream>
 	#include <thread>
 #endif
 
-extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API isCompatible();
+struct BaseTask;
+struct SsboTask;
+struct FrameTask;
+
+static IUnityGraphics* graphics = NULL;
+static UnityGfxRenderer renderer = kUnityGfxRendererNull;
+
+static std::map<int, std::shared_ptr<BaseTask>> tasks;
+static std::vector<int> pending_release_tasks;
+static std::mutex tasks_mutex;
+int next_event_id = 1;
+static bool inited = false;
+
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API CheckCompatible();
 static void UNITY_INTERFACE_API OnGraphicsDeviceEvent(UnityGfxDeviceEventType eventType);
 
+// Call this on a function parameter to suppress the unused paramter warning
+template <class T> inline
+void unused(T const & result) { static_cast<void>(result); }
 
 struct BaseTask {
-	bool initialized = false;
-	bool error = false;
-	bool done = false;
+	//These vars might be accessed from both render thread and main thread. guard them.
+	std::atomic<bool> initialized;
+	std::atomic<bool> error;
+	std::atomic<bool> done;
 	/*Called in render thread*/
 	virtual void StartRequest() = 0;
 	virtual void Update() = 0;
-	virtual void* GetData(size_t* length) = 0;
-	virtual void ReleaseData() = 0;
+
+	BaseTask() :
+		initialized(false),
+		error(false),
+		done(false)
+	{
+
+	}
+
+	virtual ~BaseTask()
+	{
+		if (result_data != nullptr) {
+			delete[] result_data;
+		}
+	}
+	
+	char* GetData(size_t* length) {
+		if (!done || error) {
+			return nullptr;
+		}
+		std::lock_guard<std::mutex> guard(mainthread_data_mutex);
+		if (this->result_data == nullptr) {
+			return nullptr;
+		}
+		*length = result_data_length;
+		return result_data;
+	}
+
+protected:
+	/*
+	* Called by subclass in Update, to commit data and mark as done.
+	*/
+	void FinishAndCommitData(char* dataPtr, size_t length) {
+		std::lock_guard<std::mutex> guard(mainthread_data_mutex);
+		if (this->result_data != nullptr) {
+			//WTF
+			return;
+		}
+		this->result_data = dataPtr;
+		this->result_data_length = length;
+		done = true;
+	}
+
+	/*
+	Called by subclass to mark as error.
+	*/
+	void ErrorOut() {
+		error = true;
+		done = true;
+	}
+private:
+	std::mutex mainthread_data_mutex;
+	char* result_data = nullptr;
+	size_t result_data_length = 0;
 };
 
+/*Task for readback from ssbo. Which is compute buffer in Unity
+*/
 struct SsboTask : public BaseTask {
 	GLuint ssbo;
 	GLuint pbo;
-	char* data = nullptr;
 	GLsync fence;
 	GLint bufferSize;
 	void Init(GLuint _ssbo, GLint _bufferSize) {
@@ -67,8 +139,8 @@ struct SsboTask : public BaseTask {
 		GLsizei length = 0;
 		glGetSynciv(fence, GL_SYNC_STATUS, sizeof(GLint), &length, &status);
 		if (length <= 0) {
-			error = true;
-			done = true;
+			ErrorOut();
+			Cleanup();
 			return;
 		}
 
@@ -82,46 +154,37 @@ struct SsboTask : public BaseTask {
 			void* ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bufferSize, GL_MAP_READ_BIT);
 
 			// Allocate the final data buffer !!! WARNING: free, will have to be done on script side !!!!
-			data = new char[bufferSize];
+			char* data = new char[bufferSize];
 			std::memcpy(data, ptr, bufferSize);
+			FinishAndCommitData(data, bufferSize);
 
 			// Unmap and unbind
 			glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
 			glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+			Cleanup();
+		}
+	}
 
+	void Cleanup()
+	{
+		if (pbo != 0) {
 			// Clear buffers
 			glDeleteBuffers(1, &(pbo));
+		}
+		if (fence != 0) {
 			glDeleteSync(fence);
-
-			// yeah task is done!
-			done = true;
-		}
-	}
-
-	virtual void* GetData(size_t* length) override {
-		if (!done) {
-			return nullptr;
-		}
-		
-		*length = this->bufferSize;
-		return data;
-	}
-
-	virtual void ReleaseData() override {
-		if (data != nullptr) {
-			delete[] data;
-			data = nullptr;
 		}
 	}
 };
 
+/*Task for readback texture.
+*/
 struct FrameTask : public BaseTask {
 	int size;
 	GLsync fence;
 	GLuint texture;
 	GLuint fbo;
 	GLuint pbo;
-	char* data = nullptr;
 	int miplevel;
 	int height;
 	int width;
@@ -141,11 +204,9 @@ struct FrameTask : public BaseTask {
 			|| pixelBits % 8 != 0	//Only support textures aligned to one byte.
 			|| getFormatFromInternalFormat(internal_format) == 0
 			|| getTypeFromInternalFormat(internal_format) == 0) {
-			error = true;
+			ErrorOut();
+			return;
 		}
-
-		// Allocate the final data buffer !!! WARNING: free, will have to be done on script side !!!!
-		data = new char[size];
 
 		// Create the fbo (frame buffer object) from the given texture
 		glGenFramebuffers(1, &(fbo));
@@ -177,8 +238,8 @@ struct FrameTask : public BaseTask {
 		GLsizei length = 0;
 		glGetSynciv(fence, GL_SYNC_STATUS, sizeof(GLint), &length, &status);
 		if (length <= 0) {
-			error = true;
-			done = true;
+			ErrorOut();
+			Cleanup();
 			return;
 		}
 
@@ -189,46 +250,30 @@ struct FrameTask : public BaseTask {
 			glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
 
 			// Map the buffer and copy it to data
+
+			char* data = new char[size];
 			void* ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, size, GL_MAP_READ_BIT);
 			std::memcpy(data, ptr, size);
+			FinishAndCommitData(data, size);
 
 			// Unmap and unbind
 			glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
 			glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+			Cleanup();
+		}
+	}
 
-			// Clear buffers
+	void Cleanup()
+	{
+		// Clear buffers
+		if (fbo != 0)
 			glDeleteFramebuffers(1, &(fbo));
+		if (pbo != 0)
 			glDeleteBuffers(1, &(pbo));
+		if (fence != 0)
 			glDeleteSync(fence);
-
-			// yeah task is done!
-			done = true;
-		}
-	}
-
-	virtual void* GetData(size_t* length) override {
-		if (!done) {
-			return nullptr;
-		}
-		*length = size;
-		return data;
-	}
-
-	virtual void ReleaseData() override {
-		if (data != nullptr) {
-			delete[] data;
-			data = nullptr;
-		}
 	}
 };
-
-static IUnityGraphics* graphics = NULL;
-static UnityGfxRenderer renderer = kUnityGfxRendererNull;
-
-static std::map<int,std::shared_ptr<BaseTask>> tasks;
-static std::mutex tasks_mutex;
-int next_event_id = 1;
-static bool inited = false;
 
 /**
  * Unity plugin load event
@@ -243,7 +288,7 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
     // to not miss the event in case the graphics device is already initialized
     OnGraphicsDeviceEvent(kUnityGfxDeviceEventInitialize);
 
-	if (isCompatible()) {
+	if (CheckCompatible()) {
 		inited = true;
 		glewInit();
 	}
@@ -280,19 +325,16 @@ static void UNITY_INTERFACE_API OnGraphicsDeviceEvent(UnityGfxDeviceEventType ev
 * Check if plugin is compatible with this system
 * This plugin is only compatible with opengl core
 */
-extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API isCompatible() {
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API CheckCompatible() {
 	return (renderer == kUnityGfxRendererOpenGLCore);
 }
-
 
 int InsertEvent(std::shared_ptr<BaseTask> task) {
 	int event_id = next_event_id;
 	next_event_id++;
 
-	// Save it (lock because possible vector resize)
-	tasks_mutex.lock();
+	std::lock_guard<std::mutex> guard(tasks_mutex);
 	tasks[event_id] = task;
-	tasks_mutex.unlock();
 
 	return event_id;
 }
@@ -327,9 +369,8 @@ extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API RequestComputeBufferMa
  */
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API KickstartRequestInRenderThread(int event_id) {
 	// Get task back
-	tasks_mutex.lock();
+	std::lock_guard<std::mutex> guard(tasks_mutex);
 	std::shared_ptr<BaseTask> task = tasks[event_id];
-	tasks_mutex.unlock();
 	task->StartRequest();
 	// Done init
 	task->initialized = true;
@@ -340,49 +381,68 @@ extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API GetKic
 }
 
 /**
- * @brief check if data is ready
- * Has to be called by GL.IssuePluginEvent
- * @param event_id containing the the task index, given by makeRequest_mainThread
+* Update all current available tasks. Should be called in render thread.
  */
-extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API update_renderThread(int event_id) {
-	// Get task back
-	tasks_mutex.lock();
-	std::shared_ptr<BaseTask> task = tasks[event_id];
-	tasks_mutex.unlock();
-
-	// Check if task has not been already deleted by main thread
-	if(task == nullptr) {
-		return;
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UpdateRenderThread(int event_id) {
+	unused(event_id);
+	//Lock up.
+	std::lock_guard<std::mutex> guard(tasks_mutex);
+	for (auto ite = tasks.begin(); ite != tasks.end(); ite++) {
+		auto task = ite->second;
+		if (task != nullptr && task->initialized && !task->done)
+			task->Update();
 	}
-
-	// Do something only if initialized (thread safety)
-	if (!task->initialized || task->done) {
-		return;
-	}
-
-	task->Update();
 }
 
-extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getfunction_update_renderThread() {
-	return update_renderThread;
+extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API GetUpdateRenderThreadFunctionPtr() {
+	return UpdateRenderThread;
 }
 
 /**
- * @brief Get data from the main thread. The caller owns the data pointer now.
- * @param event_id containing the the task index, given by makeRequest_mainThread
+* Update in main thread.
+* This will erase tasks that are marked as done in last frame.
+* Also save tasks that are done this frame.
+* By doing this, all tasks are done for one frame, then removed.
  */
-extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getData_mainThread(int event_id, void** buffer, size_t* length) {
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UpdateMainThread() {
+	//Lock up.
+	std::lock_guard<std::mutex> guard(tasks_mutex);
+
+	//Remove tasks that are done in the last update.
+	for (auto& event_id : pending_release_tasks) {
+		auto t = tasks.find(event_id);
+		if (t != tasks.end()) {
+			tasks.erase(t);
+		}
+	}
+	pending_release_tasks.clear();
+
+	//Push new done tasks to pending list.
+	for (auto ite = tasks.begin(); ite != tasks.end(); ite++) {
+		auto task = ite->second;
+		if (task->done) {
+			pending_release_tasks.push_back(ite->first);
+		}
+	}
+}
+
+/**
+ * @brief Get data from the main thread.
+ * The data owner is still native plugin, outside caller should copy the data asap to avoid any problem.
+ * 
+ */
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API GetData(int event_id, void** buffer, size_t* length) {
 	// Get task back
-	tasks_mutex.lock();
+	std::lock_guard<std::mutex> guard(tasks_mutex);
 	std::shared_ptr<BaseTask> task = tasks[event_id];
-	tasks_mutex.unlock();
 
 	// Do something only if initialized (thread safety)
 	if (!task->done) {
 		return;
 	}
 
-	// Copy the pointer. Warning: free will have to be done on script side
+	// Return the pointer.
+	// The memory ownership doesn't transfer.
 	auto dataPtr = task->GetData(length);
 	*buffer = dataPtr;
 }
@@ -391,11 +451,10 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API getData_mainThread(in
  * @brief Check if request exists
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
-extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API RequestExists(int event_id) {
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API TaskExists(int event_id) {
 	// Get task back
-	tasks_mutex.lock();
+	std::lock_guard<std::mutex> guard(tasks_mutex);
 	bool result = tasks.find(event_id) != tasks.end();
-	tasks_mutex.unlock();
 
 	return result;
 }
@@ -404,39 +463,25 @@ extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API RequestExists(int eve
  * @brief Check if request is done
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
-extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API isRequestDone(int event_id) {
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API TaskDone(int event_id) {
 	// Get task back
-	tasks_mutex.lock();
-	std::shared_ptr<BaseTask> task = tasks[event_id];
-	tasks_mutex.unlock();
-
-	return task->done;
+	std::lock_guard<std::mutex> guard(tasks_mutex);
+	auto ite = tasks.find(event_id);
+	if (ite != tasks.end())
+		return ite->second->done;
+	return true;	//If it's disposed, also assume it's done.
 }
 
 /**
  * @brief Check if request is in error
  * @param event_id containing the the task index, given by makeRequest_mainThread
  */
-extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API isRequestError(int event_id) {
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API TaskError(int event_id) {
 	// Get task back
-	tasks_mutex.lock();
-	std::shared_ptr<BaseTask> task = tasks[event_id];
-	tasks_mutex.unlock();
+	std::lock_guard<std::mutex> guard(tasks_mutex);
+	auto ite = tasks.find(event_id);
+	if (ite != tasks.end())
+		return ite->second->error;
 
-	return task->error;
-}
-
-/**
- * @brief clear data for a frame
- * Warning : Buffer is never cleaned, it has to be cleaned from script side
- * Has to be called by GL.IssuePluginEvent
- * @param event_id containing the the task index, given by makeRequest_mainThread
- */
-extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API dispose(int event_id) {
-	// Remove from tasks
-	tasks_mutex.lock();
-	std::shared_ptr<BaseTask> task = tasks[event_id];
-	tasks.erase(event_id);
-	task->ReleaseData();
-	tasks_mutex.unlock();
+	return true;	//It's disposed, assume as error.
 }

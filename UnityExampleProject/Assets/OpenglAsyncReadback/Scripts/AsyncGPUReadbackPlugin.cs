@@ -9,6 +9,18 @@ using Unity.Collections.LowLevel.Unsafe;
 
 namespace Yangrc.OpenGLAsyncReadback {
 
+    public static class RuntimeInitializer {
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+        static void Initialize() {
+            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLCore && AsyncReadbackUpdater.instance == null) {
+                var go = new GameObject("__OpenGL Async Readback Updater__");
+                go.hideFlags = HideFlags.HideAndDontSave;
+                GameObject.DontDestroyOnLoad(go);
+                var updater = go.AddComponent<AsyncReadbackUpdater>();
+            }
+        }
+    }
+
     /// <summary>
     /// Helper struct that wraps unity async readback and our opengl readback together, to hide difference
     /// </summary>
@@ -66,13 +78,13 @@ namespace Yangrc.OpenGLAsyncReadback {
             };
         }
 
-
+        [Obsolete]
         public void Update() {
-            if (isPlugin) {
-                oRequest.Update();
-            } else {
-                uRequest.Update();
-            }
+            //if (isPlugin) {
+            //    oRequest.Update();
+            //} else {
+            //    uRequest.Update();
+            //}
         }
 
         public bool done {
@@ -92,21 +104,6 @@ namespace Yangrc.OpenGLAsyncReadback {
                 } else {
                     return uRequest.hasError;
                 }
-            }
-        }
-
-        /// <summary>
-        /// Release memory of completed request.  
-        /// <para>
-        /// When used in unity's readback, this method just marks the request as disposed, since unity will handle it.
-        /// </para>
-        /// </summary>
-        public void Dispose() {
-            if (isPlugin) {
-                oRequest.Dispose();
-            } else {
-                uDisposd = true;
-                //Don't care.
             }
         }
 
@@ -157,8 +154,8 @@ namespace Yangrc.OpenGLAsyncReadback {
 		public bool done
 	    {
 	        get {
-                AssertRequestValid();
-                return isRequestDone(nativeTaskHandle);
+               // AssertRequestValid();
+                return TaskDone(nativeTaskHandle);
             }
 	    }
 
@@ -168,8 +165,8 @@ namespace Yangrc.OpenGLAsyncReadback {
 		public bool hasError
 	    {
 	        get {
-                AssertRequestValid();
-                return isRequestError(nativeTaskHandle);
+              //  AssertRequestValid();
+                return TaskError(nativeTaskHandle);
             }
 	    }
 
@@ -179,6 +176,7 @@ namespace Yangrc.OpenGLAsyncReadback {
             GL.IssuePluginEvent(GetKickstartFunctionPtr(), result.nativeTaskHandle);
             return result;
         }
+
         public static OpenGLAsyncReadbackRequest CreateComputeBufferRequest(int computeBufferOpenGLName, int size) {
             var result = new OpenGLAsyncReadbackRequest();
             result.nativeTaskHandle = RequestComputeBufferMainThread(computeBufferOpenGLName, size);
@@ -187,7 +185,7 @@ namespace Yangrc.OpenGLAsyncReadback {
         }
 
         public bool Valid() {
-            return RequestExists(this.nativeTaskHandle);
+            return TaskExists(this.nativeTaskHandle);
         }
 
         private void AssertRequestValid() {
@@ -205,7 +203,7 @@ namespace Yangrc.OpenGLAsyncReadback {
 			// Get data from cpp plugin
 			void* ptr = null;
 			int length = 0;
-			getData_mainThread(this.nativeTaskHandle, ref ptr, ref length);
+			GetData(this.nativeTaskHandle, ref ptr, ref length);
 
             //Copy data from plugin native memory to unity-controlled native memory.
             var resultNativeArray = new NativeArray<T>(length / UnsafeUtility.SizeOf<T>(), Allocator.Temp);
@@ -216,39 +214,31 @@ namespace Yangrc.OpenGLAsyncReadback {
             return resultNativeArray;
 		}
 
-		public void Update(bool force = false)
+		internal static void Update()
 		{
-            AssertRequestValid();
-            GL.IssuePluginEvent(getfunction_update_renderThread(), this.nativeTaskHandle);
+            UpdateMainThread();
+            GL.IssuePluginEvent(GetUpdateRenderThreadFunctionPtr(), 0);
 		}
 
-		/// <summary>
-		/// Has to be called to free the allocated buffer after it has been used
-		/// </summary>
-		public void Dispose() {
-            AssertRequestValid();
-            dispose(this.nativeTaskHandle);
-        }
-
 		[DllImport ("AsyncGPUReadbackPlugin")]
-		private static extern bool isCompatible();
+		private static extern bool CheckCompatible();
         [DllImport("AsyncGPUReadbackPlugin")]
         private static extern int RequestTextureMainThread(int texture, int miplevel);
         [DllImport("AsyncGPUReadbackPlugin")]
         private static extern int RequestComputeBufferMainThread(int bufferID, int bufferSize);
         [DllImport ("AsyncGPUReadbackPlugin")]
 		private static extern IntPtr GetKickstartFunctionPtr();
-		[DllImport ("AsyncGPUReadbackPlugin")]
-		private static extern IntPtr getfunction_update_renderThread();
-		[DllImport ("AsyncGPUReadbackPlugin")]
-		private static extern unsafe void getData_mainThread(int event_id, ref void* buffer, ref int length);
         [DllImport("AsyncGPUReadbackPlugin")]
-        private static extern bool isRequestError(int event_id);
+        private static extern IntPtr UpdateMainThread();
         [DllImport("AsyncGPUReadbackPlugin")]
-        private static extern bool RequestExists(int event_id);
+        private static extern IntPtr GetUpdateRenderThreadFunctionPtr();
         [DllImport ("AsyncGPUReadbackPlugin")]
-		private static extern bool isRequestDone(int event_id);
-		[DllImport ("AsyncGPUReadbackPlugin")]
-		private static extern void dispose(int event_id);
+		private static extern unsafe void GetData(int event_id, ref void* buffer, ref int length);
+        [DllImport("AsyncGPUReadbackPlugin")]
+        private static extern bool TaskError(int event_id);
+        [DllImport("AsyncGPUReadbackPlugin")]
+        private static extern bool TaskExists(int event_id);
+        [DllImport ("AsyncGPUReadbackPlugin")]
+		private static extern bool TaskDone(int event_id);
 	}
 }
