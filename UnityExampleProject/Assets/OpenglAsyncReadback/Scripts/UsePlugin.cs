@@ -17,25 +17,16 @@ namespace Yangrc.OpenGLAsyncReadback {
         Queue<UniversalAsyncGPUReadbackRequest> _requests = new Queue<UniversalAsyncGPUReadbackRequest>();
 
         private RenderTexture rt;
-        private AsyncGPUReadbackStarter AsyncGPUReadbackStarter;
         private void Start() {
             var cam = GetComponent<Camera>();
-            rt = new RenderTexture(1000, 500, 24, UnityEngine.RenderTextureFormat.DefaultHDR, RenderTextureReadWrite.sRGB);
-            rt.Create();
-            AsyncGPUReadbackStarter = new TextureAsyncGPUReadbackStarter(rt);
-            GetComponent<Camera>().targetTexture = rt;
         }
 
         void Update() {
             while (_requests.Count > 0) {
                 var req = _requests.Peek();
 
-                // You need to explicitly ask for an update regularly
-                req.Update();
-
                 if (req.hasError) {
                     Debug.LogError("GPU readback error detected.");
-                    req.Dispose();
                     _requests.Dequeue();
                 } else if (req.done) {
                     // Get data from the request when it's done
@@ -44,9 +35,6 @@ namespace Yangrc.OpenGLAsyncReadback {
                     // Save the image
                     Camera cam = GetComponent<Camera>();
                     SaveBitmap(buffer, cam.pixelWidth, cam.pixelHeight);
-
-                    // You need to explicitly Dispose data after using them
-                    req.Dispose();
 
                     _requests.Dequeue();
                 } else {
@@ -58,20 +46,19 @@ namespace Yangrc.OpenGLAsyncReadback {
         void OnRenderImage(RenderTexture source, RenderTexture destination) {
             Graphics.Blit(source, destination);
             
-            //if (Time.frameCount % 60 == 0) {
+            if (Time.frameCount % 60 == 0) {
                 if (_requests.Count < 8)
-                    _requests.Enqueue(AsyncGPUReadbackStarter.StartReadback());
+                    _requests.Enqueue(UniversalAsyncGPUReadbackRequest.Request(source));
                 else
                     Debug.LogWarning("Too many requests.");
-           //}
+           }
         }
 
         void SaveBitmap(NativeArray<byte> buffer, int width, int height) {
             Debug.Log("Write to file");
-            for (int i = 0; i < 100; i++) {
-                Debug.Log(buffer[i]);
-            }
-            File.WriteAllBytes("test.bin", buffer.ToArray());
+            var texture = new Texture2D(width, height, TextureFormat.RGBAHalf, false);
+            texture.LoadRawTextureData(buffer);
+            File.WriteAllBytes("test.png", ImageConversion.EncodeToPNG(texture));
         }
     }
 }

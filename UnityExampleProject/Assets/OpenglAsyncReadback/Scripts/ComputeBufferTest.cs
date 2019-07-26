@@ -25,13 +25,11 @@ namespace Yangrc.OpenGLAsyncReadback {
 
         private void Update() {
             if (request.valid) {
-                request.Update();
                 if (request.done) {
                     test = request.GetData<float>();
                     foreach (var item in test) {
                         Debug.Log(item);
                     }
-                    request.Dispose();
                 }
             }
         }
