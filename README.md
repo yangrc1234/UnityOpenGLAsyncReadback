@@ -1,6 +1,6 @@
 
 # AsyncGPUReadbackPlugin
-This repo is heavily based off [Alabate's great work](https://github.com/Alabate/AsyncGPUReadbackPlugin), also added function to read compute buffer. The api is sligtly changed from original repo, to make it easier to use. The native code has been refactored to be more safe. Since I can't reach to Alabate, so I create this new repo to add more functionality.  
+This repo is heavily based on [Alabate's great work](https://github.com/Alabate/AsyncGPUReadbackPlugin), also added function to read compute buffer. The api is sligtly changed from original repo, to make it easier to use. The native code has been refactored to be more safe. Since I can't reach to Alabate, so I create this new repo to add more functionality.  
 
 On Unity 2018.2 was introduced a really neat feature: being able get a frame from the gpu to the cpu without blocking the rendering. This feature is really useful for screenshot or network stream of a game camera because we need the frame on the cpu, but we don't care if there is a little delay.
 
