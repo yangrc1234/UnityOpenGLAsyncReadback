@@ -14,6 +14,7 @@ namespace Yangrc.OpenGLAsyncReadback {
         }
         void Update() {
             OpenGLAsyncReadbackRequest.Update();
+            RenderTextureRegistery.ClearDeadRefs();
         }
     }
 }

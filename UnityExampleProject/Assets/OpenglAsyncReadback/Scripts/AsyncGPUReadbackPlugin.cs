@@ -6,8 +6,51 @@ using System.Runtime.InteropServices;
 using UnityEngine.Rendering;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
+using System.Collections.Generic;
 
 namespace Yangrc.OpenGLAsyncReadback {
+    /// <summary>
+    /// Remember rendertexture's native pointer.
+    /// 
+    /// It's cost to call GetNativeTexturePtr() for Unity, it will cause sync between render thread and main thread.
+    /// </summary>
+    internal static class RenderTextureRegistery {
+        static Dictionary<Texture, IntPtr> ptrs = new Dictionary<Texture, IntPtr>();
+        static Dictionary<ComputeBuffer, IntPtr> cbPtrs = new Dictionary<ComputeBuffer, IntPtr>();
+        static public IntPtr GetFor(Texture rt) {
+            if (ptrs.ContainsKey(rt)) {
+                return ptrs[rt];
+            } else {
+                var ptr = rt.GetNativeTexturePtr();
+                ptrs.Add(rt, ptr);
+                return ptr;
+            }
+        }
+
+        static public IntPtr GetFor(ComputeBuffer rt) {
+            if (cbPtrs.ContainsKey(rt)) {
+                return cbPtrs[rt];
+            } else {
+                var ptr = rt.GetNativeBufferPtr();
+                cbPtrs.Add(rt, ptr);
+                return ptr;
+            }
+        }
+
+        static public void ClearDeadRefs() {    //Clear disposed pointers.
+            foreach (var item in cbPtrs) {
+                if (item.Key == null)
+                    cbPtrs.Remove(item.Key);
+            }
+
+            foreach (var item in ptrs) {
+                if (item.Key == null) {
+                    ptrs.Remove(item.Key);
+                }
+            }
+        }
+    }
+
 
     public static class RuntimeInitializer {
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
@@ -43,7 +86,7 @@ namespace Yangrc.OpenGLAsyncReadback {
             } else {
                 return new UniversalAsyncGPUReadbackRequest() {
                     isPlugin = true,
-                    oRequest = OpenGLAsyncReadbackRequest.CreateTextureRequest((int)src.GetNativeTexturePtr(), 0)
+                    oRequest = OpenGLAsyncReadbackRequest.CreateTextureRequest(RenderTextureRegistery.GetFor(src).ToInt32(), mipmapIndex)
                 };  
             }
         }
@@ -59,7 +102,7 @@ namespace Yangrc.OpenGLAsyncReadback {
             } else {
                 return new UniversalAsyncGPUReadbackRequest() {
                     isPlugin = true,
-                    oRequest = OpenGLAsyncReadbackRequest.CreateTextureRequest((int)computeBuffer.GetNativeBufferPtr(), 0),
+                    oRequest = OpenGLAsyncReadbackRequest.CreateComputeBufferRequest((int)computeBuffer.GetNativeBufferPtr(), computeBuffer.stride * computeBuffer.count),
                 };
             }
         }
@@ -67,7 +110,7 @@ namespace Yangrc.OpenGLAsyncReadback {
         public static UniversalAsyncGPUReadbackRequest OpenGLRequestTexture(int texture, int mipmapIndex) {
             return new UniversalAsyncGPUReadbackRequest() {
                 isPlugin = true,
-                oRequest = OpenGLAsyncReadbackRequest.CreateTextureRequest((int)texture, 0)
+                oRequest = OpenGLAsyncReadbackRequest.CreateTextureRequest((int)texture, mipmapIndex)
             };
         }
 

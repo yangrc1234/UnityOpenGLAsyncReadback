@@ -21,25 +21,9 @@ All C# apis are inside namespace Yangrc.OpenGLAsyncReadback.
 
 To start a readback, use `UniversalAsyncGPUReadbackRequest UniversalAsyncGPUReadbackRequest.Request(Texture tex)`. This function returns "universal" object, which means it could be a Unity's standard readback request, or a OpenGL request if under opengl environment. After that, it will automatically update during every frame(You don't have to manually call Update(), there's a global dontdestroyonload gameobject doing this).
 
-Once the request is started, you should check if it's done by `request.done` in update every frame. If it returns true, call `request.hasError` to check if any error exists. If no error, call `request.GetData<T>` to get result data in NativeArray<T>.
+Once the request is started, you should check if it's done by `request.done` in update every frame. If it returns true, call `request.hasError` to check if any error exists. If no error, call `request.GetData<T>` to get result data in `NativeArray<T>`.
 
 The done status will only be valid for one frame, then everything is automatically disposed. So once it's done, copy the data to your own storage ASAP.  
-
-### Better performance
-For some reasons, to start a readback, we must have the native pointer of that buffer/texture. But the Unity API to acquire the pointer causes render thread to sync with main thread and that is huge performance loss. If you want to do readback every frame, you must save the pointer during intialization and use that for later usage.  
-A helper class `AsyncGPUReadbackStarter` is created for this particular case. To use it, once your texture/buffer is created, create corresponding AsyncGPUReadbackStarter of it. Once you want to call readback, just use starter.StartReadback(), which returns a request just like other api.  E.g.
-```C#
-    ComputeBuffer t;
-    ComputeBufferAsyncGPUReadbackStarter starter;
-    void Start(){
-        t = new ComputeBuffer(...);
-        starter = new ComputeBufferAsyncGPUReadbackStarter(t);
-    }
-    void Update(){
-        var request = starter.StartReadback();
-        ...
-    }
-```
 
 ### Example
 To see a working example you can open `UnityExampleProject` with the Unity editor. It saves screenshot of the camera every 60 frames. The script taking screenshot is in `UnityExampleProject/Assets/OpenglAsyncReadback/Scripts/UsePlugin.cs`
@@ -67,3 +51,6 @@ There's lots of buffer/texture format/type in Unity, and I can't have them all t
 
 ## Thanks
 Again, thanks to [Alabate's great work](https://github.com/Alabate/AsyncGPUReadbackPlugin). It's his/her work that I learnt it's possible to do async readback under opengl.
+
+# Changelog
+2020-03-01 Remove ReadbackStarter class, it's not needed anymore.
